@@ -35,7 +35,6 @@ type Engine struct {
 	cfg          *EngineConfig
 	lggr         logger.Logger
 	loggerLabels map[string]string
-	localNode    capabilities.Node
 
 	// registration ID -> trigger capability
 	triggers map[string]*triggerCapability
@@ -63,7 +62,7 @@ type enqueuedTriggerEvent struct {
 	event        capabilities.TriggerResponse
 }
 
-func NewEngine(ctx context.Context, cfg *EngineConfig) (*Engine, error) {
+func NewEngine(cfg *EngineConfig) (*Engine, error) {
 	err := cfg.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
@@ -72,24 +71,20 @@ func NewEngine(ctx context.Context, cfg *EngineConfig) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not initialize monitoring resources: %w", err)
 	}
-	localNode, err := cfg.CapRegistry.LocalNode(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("could not get local node state: %w", err)
-	}
 
 	labels := []any{
 		platform.KeyWorkflowID, cfg.WorkflowID,
 		platform.KeyWorkflowOwner, cfg.WorkflowOwner,
 		platform.KeyWorkflowName, cfg.WorkflowName.String(),
 		platform.KeyWorkflowVersion, platform.ValueWorkflowVersionV2,
-		platform.KeyDonID, strconv.Itoa(int(localNode.WorkflowDON.ID)),
-		platform.KeyDonF, strconv.Itoa(int(localNode.WorkflowDON.F)),
-		platform.KeyDonN, strconv.Itoa(len(localNode.WorkflowDON.Members)),
+		platform.KeyDonID, strconv.Itoa(int(cfg.LocalNode.WorkflowDON.ID)),
+		platform.KeyDonF, strconv.Itoa(int(cfg.LocalNode.WorkflowDON.F)),
+		platform.KeyDonN, strconv.Itoa(len(cfg.LocalNode.WorkflowDON.Members)),
 		platform.KeyDonQ, strconv.Itoa(aggregation.ByzantineQuorum(
-			len(localNode.WorkflowDON.Members),
-			int(localNode.WorkflowDON.F),
+			len(cfg.LocalNode.WorkflowDON.Members),
+			int(cfg.LocalNode.WorkflowDON.F),
 		)),
-		platform.KeyP2PID, localNode.PeerID.String(),
+		platform.KeyP2PID, cfg.LocalNode.PeerID.String(),
 	}
 
 	beholderLogger := custmsg.NewBeholderLogger(cfg.Lggr, cfg.BeholderEmitter).Named("WorkflowEngine").With(labels...)
@@ -106,7 +101,6 @@ func NewEngine(ctx context.Context, cfg *EngineConfig) (*Engine, error) {
 		cfg:                     cfg,
 		lggr:                    beholderLogger,
 		loggerLabels:            labelsMap,
-		localNode:               localNode,
 		triggers:                make(map[string]*triggerCapability),
 		allTriggerEventsQueueCh: make(chan enqueuedTriggerEvent, cfg.LocalLimits.TriggerEventQueueSize),
 		executionsSemaphore:     make(chan struct{}, cfg.LocalLimits.MaxConcurrentWorkflowExecutions),
@@ -161,8 +155,8 @@ func (e *Engine) init(ctx context.Context) {
 
 func (e *Engine) runTriggerSubscriptionPhase(ctx context.Context) error {
 	// call into the workflow to get trigger subscriptions
-	subCtx, cancel := context.WithTimeout(ctx, time.Millisecond*time.Duration(e.cfg.LocalLimits.TriggerSubscriptionRequestTimeoutMs))
-	defer cancel()
+	subCtx, subCancel := context.WithTimeout(ctx, time.Millisecond*time.Duration(e.cfg.LocalLimits.TriggerSubscriptionRequestTimeoutMs))
+	defer subCancel()
 	result, err := e.cfg.Module.Execute(subCtx, &wasmpb.ExecuteRequest{
 		Request:         &wasmpb.ExecuteRequest_Subscribe{},
 		MaxResponseSize: uint64(e.cfg.LocalLimits.ModuleExecuteMaxResponseSizeBytes),
@@ -193,6 +187,8 @@ func (e *Engine) runTriggerSubscriptionPhase(ctx context.Context) error {
 	}
 
 	// register to all triggers
+	regCtx, regCancel := context.WithTimeout(ctx, time.Millisecond*time.Duration(e.cfg.LocalLimits.TriggerAllRegistrationsTimeoutMs))
+	defer regCancel()
 	e.triggersRegMu.Lock()
 	defer e.triggersRegMu.Unlock()
 	eventChans := make([]<-chan capabilities.TriggerResponse, len(subs.Subscriptions))
@@ -200,17 +196,16 @@ func (e *Engine) runTriggerSubscriptionPhase(ctx context.Context) error {
 	for i, sub := range subs.Subscriptions {
 		triggerCap := triggers[i]
 		registrationID := fmt.Sprintf("trigger_reg_%s_%d", e.cfg.WorkflowID, i)
-		// TODO(CAPPL-737): run with a timeout
 		e.lggr.Debugw("Registering trigger", "triggerID", sub.Id, "method", sub.Method)
-		triggerEventCh, err := triggerCap.RegisterTrigger(ctx, capabilities.TriggerRegistrationRequest{
+		triggerEventCh, err := triggerCap.RegisterTrigger(regCtx, capabilities.TriggerRegistrationRequest{
 			TriggerID: registrationID,
 			Metadata: capabilities.RequestMetadata{
 				WorkflowID:               e.cfg.WorkflowID,
 				WorkflowOwner:            e.cfg.WorkflowOwner,
 				WorkflowName:             e.cfg.WorkflowName.Hex(),
 				DecodedWorkflowName:      e.cfg.WorkflowName.String(),
-				WorkflowDonID:            e.localNode.WorkflowDON.ID,
-				WorkflowDonConfigVersion: e.localNode.WorkflowDON.ConfigVersion,
+				WorkflowDonID:            e.cfg.LocalNode.WorkflowDON.ID,
+				WorkflowDonConfigVersion: e.cfg.LocalNode.WorkflowDON.ConfigVersion,
 				ReferenceID:              fmt.Sprintf("trigger_%d", i),
 				// no WorkflowExecutionID needed (or available at this stage)
 			},
@@ -272,7 +267,11 @@ func (e *Engine) handleAllTriggerEvents(ctx context.Context) {
 			if !isOpen {
 				return
 			}
-			// TODO(CAPPL-737): check if expired
+			eventAge := queueHead.timestamp.Sub(e.cfg.Clock.Now())
+			if eventAge > time.Duration(e.cfg.LocalLimits.TriggerEventMaxAgeMs)*time.Millisecond {
+				e.lggr.Warnw("Trigger event is too old, skipping execution", "triggerID", queueHead.triggerCapID, "eventID", queueHead.event.Event.ID, "eventAgeMs", eventAge.Milliseconds())
+				continue
+			}
 			select {
 			case e.executionsSemaphore <- struct{}{}: // block if too many concurrent workflow executions
 				e.srvcEng.Go(func(srvcCtx context.Context) {
@@ -296,16 +295,6 @@ func (e *Engine) startExecution(ctx context.Context, wrappedTriggerEvent enqueue
 	}
 
 	// TODO(CAPPL-911): add rate-limiting
-
-	subCtx, cancel := context.WithTimeout(ctx, time.Millisecond*time.Duration(e.cfg.LocalLimits.WorkflowExecutionTimeoutMs))
-	defer cancel()
-	executionLogger := logger.With(e.lggr, "executionID", executionID, "triggerID", wrappedTriggerEvent.triggerCapID, "triggerIndex", wrappedTriggerEvent.triggerIndex)
-
-	tid, err := safe.IntToUint64(wrappedTriggerEvent.triggerIndex)
-	if err != nil {
-		executionLogger.Errorw("Failed to convert trigger index to uint64", "err", err)
-		return
-	}
 
 	meteringReport, meteringErr := e.meterReports.Start(ctx, executionID)
 	if meteringErr != nil {
@@ -336,11 +325,22 @@ func (e *Engine) startExecution(ctx context.Context, wrappedTriggerEvent enqueue
 		}
 	}
 
-	startTime := time.Now()
+	execCtx, execCancel := context.WithTimeout(ctx, time.Millisecond*time.Duration(e.cfg.LocalLimits.WorkflowExecutionTimeoutMs))
+	defer execCancel()
+	executionLogger := logger.With(e.lggr, "executionID", executionID, "triggerID", wrappedTriggerEvent.triggerCapID, "triggerIndex", wrappedTriggerEvent.triggerIndex)
+
+	tid, err := safe.IntToUint64(wrappedTriggerEvent.triggerIndex)
+	if err != nil {
+		executionLogger.Errorw("Failed to convert trigger index to uint64", "err", err)
+		return
+	}
+
+	startTime := e.cfg.Clock.Now()
 	executionLogger.Infow("Workflow execution starting ...")
 	_ = events.EmitExecutionStartedEvent(ctx, e.loggerLabels, triggerEvent.ID, executionID)
+	executionStatus := store.StatusStarted
 
-	result, err := e.cfg.Module.Execute(subCtx, &wasmpb.ExecuteRequest{
+	result, err := e.cfg.Module.Execute(execCtx, &wasmpb.ExecuteRequest{
 		Request: &wasmpb.ExecuteRequest_Trigger{
 			Trigger: &sdkpb.Trigger{
 				Id:      tid,
@@ -351,11 +351,16 @@ func (e *Engine) startExecution(ctx context.Context, wrappedTriggerEvent enqueue
 		// TODO(CAPPL-729): pass workflow config
 	}, &ExecutionHelper{Engine: e, WorkflowExecutionID: executionID})
 
-	endTime := time.Now()
-	executionMS := strconv.Itoa(int(endTime.Sub(startTime).Milliseconds()))
+	endTime := e.cfg.Clock.Now()
+	executionDuration := endTime.Sub(startTime)
 
 	if isMetering {
-		mrErr := meteringReport.Settle(metering.ComputeResourceDimension, []capabilities.MeteringNodeDetail{{Peer2PeerID: e.localNode.PeerID.String(), SpendUnit: metering.ComputeResourceDimension, SpendValue: executionMS}})
+		mrErr := meteringReport.Settle(metering.ComputeResourceDimension,
+			[]capabilities.MeteringNodeDetail{{
+				Peer2PeerID: e.cfg.LocalNode.PeerID.String(),
+				SpendUnit:   metering.ComputeResourceDimension,
+				SpendValue:  strconv.Itoa(int(executionDuration.Milliseconds())),
+			}})
 		if mrErr != nil {
 			e.cfg.Lggr.Errorw("could not set metering for compute", "err", mrErr)
 		}
@@ -366,21 +371,23 @@ func (e *Engine) startExecution(ctx context.Context, wrappedTriggerEvent enqueue
 	}
 
 	if err != nil {
-		status := store.StatusErrored
+		executionStatus = store.StatusErrored
 		if errors.Is(err, context.DeadlineExceeded) {
-			status = store.StatusTimeout
+			executionStatus = store.StatusTimeout
 		}
-		executionLogger.Errorw("Workflow execution failed", "err", err, "status", status)
-		_ = events.EmitExecutionFinishedEvent(ctx, e.loggerLabels, status, executionID)
+		executionLogger.Errorw("Workflow execution failed", "err", err, "status", executionStatus, "durationMs", executionDuration.Milliseconds())
+		_ = events.EmitExecutionFinishedEvent(ctx, e.loggerLabels, executionStatus, executionID)
+		e.cfg.Hooks.OnExecutionFinished(executionID, executionStatus)
 		return
 	}
-	// TODO(CAPPL-737): measure and report execution time
-
-	executionLogger.Infow("Workflow execution finished successfully")
-	_ = events.EmitExecutionFinishedEvent(ctx, e.loggerLabels, store.StatusCompleted, executionID)
+	executionStatus = store.StatusCompleted
+	executionLogger.Infow("Workflow execution finished successfully", "durationMs", executionDuration.Milliseconds())
+	_ = events.EmitExecutionFinishedEvent(ctx, e.loggerLabels, executionStatus, executionID)
 
 	e.cfg.Hooks.OnResultReceived(result)
-	e.cfg.Hooks.OnExecutionFinished(executionID)
+	e.cfg.Hooks.OnExecutionFinished(executionID, executionStatus)
+
+	// TODO reduce duplicate code here
 }
 
 func (e *Engine) close() error {
@@ -402,7 +409,7 @@ func (e *Engine) unregisterAllTriggers(ctx context.Context) {
 			TriggerID: registrationID,
 			Metadata: capabilities.RequestMetadata{
 				WorkflowID:    e.cfg.WorkflowID,
-				WorkflowDonID: e.localNode.WorkflowDON.ID,
+				WorkflowDonID: e.cfg.LocalNode.WorkflowDON.ID,
 			},
 			Payload: trigger.payload,
 		})

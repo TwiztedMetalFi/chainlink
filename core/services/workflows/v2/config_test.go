@@ -2,11 +2,16 @@ package v2_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"testing"
 
 	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/require"
 
+	ragetypes "github.com/smartcontractkit/libocr/ragep2p/types"
+
+	"github.com/smartcontractkit/chainlink-common/pkg/capabilities"
 	"github.com/smartcontractkit/chainlink-common/pkg/custmsg"
 	regmocks "github.com/smartcontractkit/chainlink-common/pkg/types/core/mocks"
 	modulemocks "github.com/smartcontractkit/chainlink-common/pkg/workflows/wasm/host/mocks"
@@ -64,6 +69,7 @@ func defaultTestConfig(t *testing.T) *v2.EngineConfig {
 		Lggr:                 lggr,
 		Module:               modulemocks.NewModuleV2(t),
 		CapRegistry:          regmocks.NewCapabilitiesRegistry(t),
+		LocalNode:            newNode(t),
 		ExecutionsStore:      store.NewInMemoryStore(lggr, clockwork.NewRealClock()),
 		WorkflowID:           testWorkflowID,
 		WorkflowOwner:        testWorkflowOwnerA,
@@ -73,6 +79,16 @@ func defaultTestConfig(t *testing.T) *v2.EngineConfig {
 		ExecutionRateLimiter: rateLimiter,
 		BeholderEmitter:      &noopBeholderEmitter{},
 		BillingClient:        metmocks.NewBillingClient(t),
+	}
+}
+
+func newNode(t *testing.T) *capabilities.Node {
+	_, privKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	peerID, err := ragetypes.PeerIDFromPrivateKey(privKey)
+	require.NoError(t, err)
+	return &capabilities.Node{
+		PeerID: &peerID,
 	}
 }
 

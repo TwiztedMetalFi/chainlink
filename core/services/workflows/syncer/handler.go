@@ -530,11 +530,17 @@ func (h *eventHandler) engineFactoryFn(ctx context.Context, workflowID string, o
 		return workflows.NewEngine(ctx, cfg)
 	}
 
+	localNode, err := h.capRegistry.LocalNode(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("could not get local node state: %w", err)
+	}
+
 	// V2 aka "NoDAG"
 	cfg := &v2.EngineConfig{
 		Lggr:            h.lggr,
 		Module:          module,
 		CapRegistry:     h.capRegistry,
+		LocalNode:       &localNode,
 		ExecutionsStore: h.workflowStore,
 
 		WorkflowID:    workflowID,
@@ -548,7 +554,7 @@ func (h *eventHandler) engineFactoryFn(ctx context.Context, workflowID string, o
 		BeholderEmitter: h.emitter,
 		BillingClient:   h.billingClient,
 	}
-	return v2.NewEngine(ctx, cfg)
+	return v2.NewEngine(cfg)
 }
 
 // workflowUpdatedEvent handles the WorkflowUpdatedEvent event type by first finding the

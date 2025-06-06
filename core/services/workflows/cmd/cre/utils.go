@@ -132,10 +132,16 @@ func NewStandaloneEngine(
 		return workflows.NewEngine(ctx, cfg)
 	}
 
+	localNode, err := registry.LocalNode(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("could not get local node state: %w", err)
+	}
+
 	cfg := &v2.EngineConfig{
 		Lggr:            lggr,
 		Module:          module,
 		CapRegistry:     registry,
+		LocalNode:       &localNode,
 		ExecutionsStore: store.NewInMemoryStore(lggr, clockwork.NewRealClock()),
 
 		WorkflowID:    defaultWorkflowID,
@@ -152,7 +158,7 @@ func NewStandaloneEngine(
 		Hooks:         lifecycleHooks,
 	}
 
-	return v2.NewEngine(ctx, cfg)
+	return v2.NewEngine(cfg)
 }
 
 // TODO support fetching secrets (from a local file)
