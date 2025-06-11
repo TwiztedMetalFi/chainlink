@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/shopspring/decimal"
@@ -68,9 +69,11 @@ type Report struct {
 	workflowExecutionID string
 
 	// dependencies
-	balance *balanceStore
-	client  BillingClient
-	lggr    logger.Logger
+	balance        *balanceStore
+	client         BillingClient
+	limitOverrides map[string]string
+	rateCard       map[string]decimal.Decimal
+	lggr           logger.Logger
 
 	// internal state
 	ready bool
@@ -84,8 +87,9 @@ func NewReport(owner, workflowID, workflowExecutionID string, lggr logger.Logger
 		workflowID:          workflowID,
 		workflowExecutionID: workflowExecutionID,
 
-		client: client,
-		lggr:   logger.Sugared(lggr).Named("Metering").With("workflowExecutionID", workflowExecutionID),
+		client:         client,
+		limitOverrides: make(map[string]string),
+		lggr:           logger.Sugared(lggr).Named("Metering").With("workflowExecutionID", workflowExecutionID),
 
 		ready: false,
 		steps: make(map[string]ReportStep),
@@ -119,6 +123,7 @@ func (r *Report) Reserve(ctx context.Context) error {
 	if err != nil {
 		r.lggr.Warnf("failed to reserve credits: %s", err)
 		r.enterMeteringMode()
+
 		return nil
 	}
 
@@ -130,6 +135,7 @@ func (r *Report) Reserve(ctx context.Context) error {
 	if err != nil {
 		r.lggr.Warnf("failed to parse rate card: %s", err)
 		r.enterMeteringMode()
+
 		return nil
 	}
 
@@ -137,15 +143,8 @@ func (r *Report) Reserve(ctx context.Context) error {
 	dummyInitialBalance := int64(10000)
 	r.ready = true
 	r.balance = NewBalanceStore(dummyInitialBalance, rateCard, r.lggr)
-	return nil
-}
 
-func (r *Report) enterMeteringMode() {
-	// TODO: https://smartcontract-it.atlassian.net/browse/CRE-453 pass through errors and persist cause of metering mode on to meteringReport
-	balanceStore := NewBalanceStore(0, map[string]decimal.Decimal{}, r.lggr)
-	balanceStore.AllowNegative()
-	r.ready = true
-	r.balance = balanceStore
+	return nil
 }
 
 // ConvertFromBalance converts a credit amount to a resource dimensions amount.
@@ -196,9 +195,29 @@ func (r *Report) Deduct(ref string, amount int64) error {
 	return nil
 }
 
+func (r *Report) ApplyLimitToRequest(
+	info capabilities.CapabilityInfo,
+	req *capabilities.CapabilityRequest,
+	amount int64,
+) {
+	if len(info.SpendTypes) > 0 {
+		spendType := info.SpendTypes[0]
+
+		// use rate card to convert capSpendLimit to native units
+		rate, ok := r.rateCard[string(spendType)]
+		if !ok {
+			r.lggr.Errorf("no rate exists in rate card for %s; entering metering mode", spendType)
+			r.enterMeteringMode()
+		} else {
+			spendLimit := decimal.NewFromInt(amount).Div(rate)                                                       // TODO: should we use Div or Mul here?
+			req.Metadata.SpendLimits = []capabilities.SpendLimit{{SpendType: spendType, Limit: spendLimit.String()}} // TODO: should we apply rounding? maybe take only the int part?
+		}
+	}
+}
+
 // GetAvailableForInvocation returns the amount of credits that can be used based on the available credit balance.
 // This is determined by dividing unearmarked local credit balance by the number of potential concurrent calls.
-func (r *Report) GetAvailableForInvocation(openConcurrentCallSlots int) (int64, error) {
+func (r *Report) GetAvailableForInvocation(ref string, openConcurrentCallSlots int) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -215,12 +234,33 @@ func (r *Report) GetAvailableForInvocation(openConcurrentCallSlots int) (int64, 
 		return math.MaxInt64, nil
 	}
 
-	// Split the available local balance between the potential number of concurrent calls that can be made
-	available := r.balance.Get()
-	share := decimal.NewFromInt(available).Div(decimal.NewFromInt(int64(openConcurrentCallSlots)))
-	roundedShare := share.RoundDown(0).IntPart()
+	// if a limit exists, we don't need to do a calculation on the concurrent calls
+	// Split the available local balance between the number of concurrent calls that can still be made
+	capSpendLimit := r.balance.Get()
+	var hasUserOverride bool
 
-	return roundedShare, nil
+	// spend limit overrides are for the entire capability
+	if override, ok := r.limitOverrides[ref]; ok {
+		value, err := strconv.ParseInt(override, 10, 64)
+		if err != nil {
+			r.lggr.Errorf("failed to parse override value as int64: %s; switching to metering mode", err)
+			r.enterMeteringMode()
+		} else {
+			hasUserOverride = true
+
+			if value < capSpendLimit {
+				capSpendLimit = value
+			}
+		}
+	}
+
+	if !hasUserOverride {
+		// if no user specified spend limit exists, calculate spend limit on concurrent calls
+		share := decimal.NewFromInt(capSpendLimit).Div(decimal.NewFromInt(int64(openConcurrentCallSlots)))
+		capSpendLimit = share.RoundDown(0).IntPart()
+	}
+
+	return capSpendLimit, nil
 }
 
 // Settle handles the actual spends that each node used for a given capability invocation in the engine,
@@ -341,6 +381,14 @@ func (r *Report) SendReceipt(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (r *Report) enterMeteringMode() {
+	// TODO: https://smartcontract-it.atlassian.net/browse/CRE-453 pass through errors and persist cause of metering mode on to meteringReport
+	balanceStore := NewBalanceStore(0, map[string]decimal.Decimal{}, r.lggr)
+	balanceStore.AllowNegative()
+	r.ready = true
+	r.balance = balanceStore
 }
 
 func toRateCard(rates []*billing.ResourceUnitRate) (map[string]decimal.Decimal, error) {

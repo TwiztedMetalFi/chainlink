@@ -196,14 +196,14 @@ func Test_Report_GetAvailableForInvocation(t *testing.T) {
 	t.Run("error if open slots is 0", func(t *testing.T) {
 		t.Parallel()
 		report := NewReport(testAccountID, testWorkflowID, testWorkflowExecutionID, logger.TestSugared(t), nil)
-		_, err := report.GetAvailableForInvocation(0)
+		_, err := report.GetAvailableForInvocation("", 0)
 		require.ErrorIs(t, ErrNoOpenCalls, err)
 	})
 
 	t.Run("error if reserve is not called first", func(t *testing.T) {
 		t.Parallel()
 		report := NewReport(testAccountID, testWorkflowID, testWorkflowExecutionID, logger.TestSugared(t), nil)
-		_, err := report.GetAvailableForInvocation(1)
+		_, err := report.GetAvailableForInvocation("", 1)
 		require.ErrorIs(t, ErrNoReserve, err)
 	})
 
@@ -214,7 +214,7 @@ func Test_Report_GetAvailableForInvocation(t *testing.T) {
 		report := NewReport(testAccountID, testWorkflowID, testWorkflowExecutionID, logger.TestSugared(t), billingClient)
 		err := report.Reserve(t.Context())
 		require.NoError(t, err)
-		available, err := report.GetAvailableForInvocation(1)
+		available, err := report.GetAvailableForInvocation("", 1)
 		require.NoError(t, err)
 		require.Equal(t, int64(math.MaxInt64), available)
 	})
@@ -227,7 +227,7 @@ func Test_Report_GetAvailableForInvocation(t *testing.T) {
 		err := report.Reserve(t.Context())
 		require.NoError(t, err)
 		// 1 slot = all of available balance
-		available, err := report.GetAvailableForInvocation(1)
+		available, err := report.GetAvailableForInvocation("", 1)
 		require.NoError(t, err)
 		// TODO: https://smartcontract-it.atlassian.net/browse/CRE-290 once billing client response contains balance take out dummy balance
 		require.Equal(t, int64(10000), available)

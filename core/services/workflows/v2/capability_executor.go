@@ -55,7 +55,7 @@ func (c *ExecutionHelper) CallCapability(ctx context.Context, request *sdkpb.Cap
 
 	// TODO: https://smartcontract-it.atlassian.net/browse/CRE-285 get max spend per step. Compare to availability and limits.
 
-	availableForCall, err := meterReport.GetAvailableForInvocation(int(c.cfg.LocalLimits.MaxConcurrentCapabilityCallsPerWorkflow) - len(c.capCallsSemaphore))
+	availableForCall, err := meterReport.GetAvailableForInvocation(meteringRef, int(c.cfg.LocalLimits.MaxConcurrentCapabilityCallsPerWorkflow)-len(c.capCallsSemaphore), &capReq)
 	if err != nil {
 		c.lggr.Errorw("could not reserve for capability request", "capReq", request.Id, "capReqCallbackID", request.CallbackId, "err", err)
 	}
@@ -66,6 +66,12 @@ func (c *ExecutionHelper) CallCapability(ctx context.Context, request *sdkpb.Cap
 	if err != nil {
 		c.cfg.Lggr.Errorw("could not deduct balance for capability request", "capReq", request.Id, "capReqCallbackID", request.CallbackId, "err", err)
 	}
+
+	info, err := capability.Info(ctx)
+	if err != nil {
+		c.cfg.Lggr.Error("failed to get info for capability")
+	}
+	meterReport.ApplyLimitToRequest(info, &capReq, availableForCall)
 
 	// TODO: https://smartcontract-it.atlassian.net/browse/CRE-461
 	// convert balance to CapabilityInfo resource types for use in Capability call

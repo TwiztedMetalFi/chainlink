@@ -773,12 +773,31 @@ func (e *Engine) workerForStepRequest(ctx context.Context, msg stepRequest) {
 		Ref:         msg.stepRef,
 	}
 
+	curStepID := "UNSET"
+	curStep, verr := e.workflow.Vertex(msg.stepRef)
+	if verr == nil {
+		curStepID = curStep.ID
+	} else {
+		l.Errorf("failed to resolve step in workflow; error %v", verr)
+	}
+
+	info, err := curStep.capability.Info(ctx)
+	if err != nil {
+		l.Errorf("failed to get capability info: %s", err)
+	}
+
+	// there is a fundamental difference between v1 and v2 where in the logic a capability request is constructed
+	// the logic for the reserve step is to directly support v2, but to accommodate the difference a request is
+	// constructed ahead of the reserve step here and spend limits are then provided to executeStep.
+	req := &capabilities.CapabilityRequest{}
+
 	meteringReport, meteringOK := e.meterReports.Get(msg.state.ExecutionID)
 	if meteringOK {
 		// TODO: https://smartcontract-it.atlassian.net/browse/CRE-477 Get capability info by getting the workflow vertex and talking to the capaiblity
 		// TODO: https://smartcontract-it.atlassian.net/browse/CRE-285 get max spend per step. Compare to availability and limits.
 		// NOTE: e.maxWorkerLimit is a static number leading to the availability always being undercut.
-		availableForCall, err := meteringReport.GetAvailableForInvocation(e.maxWorkerLimit)
+		availableForCall, err := meteringReport.GetAvailableForInvocation(stepState.Ref, e.maxWorkerLimit)
+
 		if err != nil {
 			l.Error(fmt.Sprintf("could get available balance for %s: %s", stepState.Ref, err))
 		}
@@ -787,6 +806,9 @@ func (e *Engine) workerForStepRequest(ctx context.Context, msg stepRequest) {
 		if err != nil {
 			l.Error(fmt.Sprintf("could not deduct balance for capability request %s: %s", stepState.Ref, err))
 		}
+
+		meteringReport.ApplyLimitToRequest(info, req, availableForCall)
+
 	} else {
 		e.metrics.With(platform.KeyWorkflowID, e.workflow.id).IncrementWorkflowMissingMeteringReport(ctx)
 		// TODO: to be bumped to error if all capabilities must implement metering
@@ -799,16 +821,9 @@ func (e *Engine) workerForStepRequest(ctx context.Context, msg stepRequest) {
 	// TODO: https://smartcontract-it.atlassian.net/browse/CRE-461
 	// convert balance to CapabilityInfo resource types for use in Capability call
 	// pass deducted amount as max spend to capability.Execute
-	inputs, response, sErr := e.executeStep(ctx, l, msg)
+	inputs, response, sErr := e.executeStep(ctx, l, msg, req.Metadata.SpendLimits)
 	stepExecutionDuration := time.Since(stepExecutionStartTime).Seconds()
 
-	curStepID := "UNSET"
-	curStep, verr := e.workflow.Vertex(msg.stepRef)
-	if verr == nil {
-		curStepID = curStep.ID
-	} else {
-		l.Errorf("failed to resolve step in workflow; error %v", verr)
-	}
 	e.metrics.With(platform.KeyCapabilityID, curStepID).UpdateWorkflowStepDurationHistogram(ctx, int64(stepExecutionDuration))
 
 	var stepStatus string
@@ -954,7 +969,12 @@ func (e *Engine) configForStep(ctx context.Context, lggr logger.Logger, step *st
 }
 
 // executeStep executes the referenced capability within a step and returns the result.
-func (e *Engine) executeStep(ctx context.Context, lggr logger.Logger, msg stepRequest) (*values.Map, capabilities.CapabilityResponse, error) {
+func (e *Engine) executeStep(
+	ctx context.Context,
+	lggr logger.Logger,
+	msg stepRequest,
+	spendLimits []capabilities.SpendLimit,
+) (*values.Map, capabilities.CapabilityResponse, error) {
 	curStep, err := e.workflow.Vertex(msg.stepRef)
 	if err != nil {
 		return nil, capabilities.CapabilityResponse{}, err
@@ -1011,6 +1031,7 @@ func (e *Engine) executeStep(ctx context.Context, lggr logger.Logger, msg stepRe
 			WorkflowDonConfigVersion: ln.WorkflowDON.ConfigVersion,
 			ReferenceID:              msg.stepRef,
 			DecodedWorkflowName:      e.workflow.name.String(),
+			SpendLimits:              spendLimits,
 		},
 	}
 
