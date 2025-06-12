@@ -8,6 +8,10 @@ defaults:
   goflags: "-ldflags=-s"
 
 plugins:
+  consensus:
+    - moduleURI: "github.com/smartcontractkit/capabilities/consensus"
+      gitRef: "b83eb38e6064809820e0b22f0e7cc5a02d6762ed"
+      installPath: "github.com/smartcontractkit/capabilities/consensus"
   cron:
     - moduleURI: "github.com/smartcontractkit/capabilities/cron"
       gitRef: "b83eb38e6064809820e0b22f0e7cc5a02d6762ed"
@@ -26,7 +30,3 @@ plugins:
       moduleURI: "github.com/smartcontractkit/capabilities/workflowevent"
       gitRef: "b83eb38e6064809820e0b22f0e7cc5a02d6762ed"
       installPath: "github.com/smartcontractkit/capabilities/workflowevent"
-  consensus:
-    - moduleURI: "github.com/smartcontractkit/capabilities/consensus"
-      gitRef: "b83eb38e6064809820e0b22f0e7cc5a02d6762ed"
-      installPath: "github.com/smartcontractkit/capabilities/consensus"
