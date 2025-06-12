@@ -3,6 +3,7 @@ package aptos
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
 	"github.com/aptos-labs/aptos-go-sdk"
 	"github.com/smartcontractkit/mcms"
@@ -54,6 +55,9 @@ func (cs DeployAptosChain) VerifyPreconditions(env cldf.Environment, config conf
 					errs = append(errs, fmt.Errorf("invalid mcms configs for Aptos chain %d: %w", chainSel, err))
 				}
 			}
+			if mcmsConfig.TimelockMinDelay == nil || mcmsConfig.TimelockMinDelay.Cmp(big.NewInt(0)) <= 0 {
+				errs = append(errs, fmt.Errorf("invalid MCMS timelock min delay for Aptos chain %d: %s", chainSel, mcmsConfig.TimelockMinDelay))
+			}
 		}
 	}
 
@@ -92,9 +96,9 @@ func (cs DeployAptosChain) Apply(env cldf.Environment, cfg config.DeployAptosCha
 
 		// Save MCMS address
 		typeAndVersion := cldf.NewTypeAndVersion(shared.AptosMCMSType, deployment.Version1_6_0)
-		err = deps.AB.Save(deps.AptosChain.Selector, mcmsSeqReport.Output.MCMSAddress.String(), typeAndVersion)
+		err = deps.AB.Save(deps.AptosChain.Selector, mcmsSeqReport.Output.MCMSAddress.StringLong(), typeAndVersion)
 		if err != nil {
-			return cldf.ChangesetOutput{}, fmt.Errorf("failed to save MCMS address %s for Aptos chain %d: %w", mcmsSeqReport.Output.MCMSAddress.String(), chainSel, err)
+			return cldf.ChangesetOutput{}, fmt.Errorf("failed to save MCMS address %s for Aptos chain %d: %w", mcmsSeqReport.Output.MCMSAddress.StringLong(), chainSel, err)
 		}
 
 		// Deploy Link token if not already deployed
@@ -121,9 +125,9 @@ func (cs DeployAptosChain) Apply(env cldf.Environment, cfg config.DeployAptosCha
 
 			// Save Link token address
 			typeAndVersion = cldf.NewTypeAndVersion(contracttypes.LinkToken, deployment.Version1_6_0)
-			err = deps.AB.Save(deps.AptosChain.Selector, linkSeqReport.Output.TokenAddress.String(), typeAndVersion)
+			err = deps.AB.Save(deps.AptosChain.Selector, linkSeqReport.Output.TokenAddress.StringLong(), typeAndVersion)
 			if err != nil {
-				return cldf.ChangesetOutput{}, fmt.Errorf("failed to save Link token address %s for Aptos chain %d: %w", linkSeqReport.Output.TokenAddress.String(), chainSel, err)
+				return cldf.ChangesetOutput{}, fmt.Errorf("failed to save Link token address %s for Aptos chain %d: %w", linkSeqReport.Output.TokenAddress.StringLong(), chainSel, err)
 			}
 			linkTokenAddress = linkSeqReport.Output.TokenAddress
 
@@ -148,9 +152,9 @@ func (cs DeployAptosChain) Apply(env cldf.Environment, cfg config.DeployAptosCha
 
 		// Save the address of the CCIP object
 		typeAndVersion = cldf.NewTypeAndVersion(shared.AptosCCIPType, deployment.Version1_6_0)
-		err = deps.AB.Save(deps.AptosChain.Selector, ccipSeqReport.Output.CCIPAddress.String(), typeAndVersion)
+		err = deps.AB.Save(deps.AptosChain.Selector, ccipSeqReport.Output.CCIPAddress.StringLong(), typeAndVersion)
 		if err != nil {
-			return cldf.ChangesetOutput{}, fmt.Errorf("failed to save CCIP address %s for Aptos chain %d: %w", ccipSeqReport.Output.CCIPAddress.String(), chainSel, err)
+			return cldf.ChangesetOutput{}, fmt.Errorf("failed to save CCIP address %s for Aptos chain %d: %w", ccipSeqReport.Output.CCIPAddress.StringLong(), chainSel, err)
 		}
 
 		// Generate MCMS proposals
