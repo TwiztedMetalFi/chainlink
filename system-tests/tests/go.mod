@@ -18,6 +18,8 @@ require (
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-playground/universal-translator v0.18.1
 	github.com/go-playground/validator/v10 v10.25.0
+	github.com/goccy/go-json v0.10.5
+	github.com/goccy/go-yaml v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/pkg/errors v0.9.1
 	github.com/rs/zerolog v1.33.0
@@ -27,7 +29,7 @@ require (
 	github.com/smartcontractkit/chainlink-deployments-framework v0.9.1
 	github.com/smartcontractkit/chainlink-evm v0.0.0-20250603180325-6ffed718392a
 	github.com/smartcontractkit/chainlink-protos/job-distributor v0.11.0
-	github.com/smartcontractkit/chainlink-testing-framework/framework v0.9.2
+	github.com/smartcontractkit/chainlink-testing-framework/framework v0.9.4
 	github.com/smartcontractkit/chainlink-testing-framework/havoc v1.50.7
 	github.com/smartcontractkit/chainlink-testing-framework/lib v1.52.4
 	github.com/smartcontractkit/chainlink-testing-framework/seth v1.51.0
@@ -227,8 +229,6 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.2.1 // indirect
 	github.com/go-webauthn/webauthn v0.9.4 // indirect
 	github.com/go-webauthn/x v0.1.5 // indirect
-	github.com/goccy/go-json v0.10.5 // indirect
-	github.com/goccy/go-yaml v1.12.0 // indirect
 	github.com/godbus/dbus v0.0.0-20190726142602-4481cbc300e2 // indirect
 	github.com/gofrs/flock v0.12.1 // indirect
 	github.com/gogo/googleapis v1.4.1 // indirect
